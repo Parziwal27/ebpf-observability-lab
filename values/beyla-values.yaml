@@ -1,0 +1,27 @@
+# Grafana Beyla Helm values
+# Beyla runs as a DaemonSet (one per node), watches processes via eBPF and
+# produces OpenTelemetry metrics + traces for every HTTP/gRPC request it sees.
+preset: application          # app-level (L7) instrumentation; "network" = flow metrics only
+
+config:
+  data:
+    # WHICH processes to instrument: only pods in the "demo" namespace
+    discovery:
+      instrument:
+        - k8s_namespace: demo
+
+    # Group URLs like /orders/123 and /orders/456 into one route "/orders/*"
+    routes:
+      unmatched: heuristic
+
+    # Add k8s metadata (namespace, pod, deployment...) to every metric/span
+    attributes:
+      kubernetes:
+        enable: true
+
+    # WHERE to send data: the OTel collector inside the LGTM pod
+    otel_traces_export:
+      endpoint: http://lgtm.observability.svc.cluster.local:4318
+    otel_metrics_export:
+      endpoint: http://lgtm.observability.svc.cluster.local:4318
+      interval: 15s            # push metrics every 15s (default is slower; fast feedback for a lab)

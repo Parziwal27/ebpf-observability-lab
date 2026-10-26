@@ -1,0 +1,193 @@
+# Demo "shop": load-gen -> frontend -> orders -> inventory
+# Plain Python stdlib HTTP servers. ZERO monitoring/tracing code on purpose:
+# everything we see in Hubble/Grafana comes from eBPF watching the kernel.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-code
+  namespace: demo
+data:
+  server.py: |
+    import os, random, time, urllib.request
+    from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+
+    NAME = os.environ["SERVICE_NAME"]
+    DOWNSTREAM = os.environ.get("DOWNSTREAM")      # e.g. http://orders:8080/orders
+    SLOW_PCT = float(os.environ.get("SLOW_PCT", "0"))
+    ERROR_PCT = float(os.environ.get("ERROR_PCT", "0"))
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/healthz":
+                return self._reply(200, "ok")
+            time.sleep(random.uniform(0.005, 0.03))              # normal work
+            if random.random() * 100 < SLOW_PCT:
+                time.sleep(random.uniform(0.4, 0.9))             # injected slowness
+            if random.random() * 100 < ERROR_PCT:
+                return self._reply(500, f"{NAME}: boom")         # injected failure
+            if DOWNSTREAM:
+                try:
+                    with urllib.request.urlopen(DOWNSTREAM, timeout=3) as r:
+                        body = r.read().decode()
+                except Exception as e:
+                    return self._reply(502, f"{NAME}: downstream failed: {e}")
+                return self._reply(200, f"{NAME} -> {body}")
+            return self._reply(200, f"{NAME} ok")
+
+        def _reply(self, code, text):
+            self.send_response(code)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(text.encode())
+
+        def log_message(self, *args):   # keep logs quiet
+            pass
+
+    ThreadingHTTPServer(("", 8080), Handler).serve_forever()
+  loadgen.py: |
+    import os, time, urllib.request
+    TARGET = os.environ["TARGET"]
+    while True:
+        try:
+            urllib.request.urlopen(TARGET, timeout=5).read()
+        except Exception:
+            pass
+        time.sleep(0.2)   # ~5 requests/second
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: frontend}
+  template:
+    metadata:
+      labels: {app: frontend}
+    spec:
+      containers:
+        - name: app
+          image: python:3.13-slim
+          command: ["python", "-u", "/code/server.py"]
+          env:
+            - {name: SERVICE_NAME, value: "frontend"}
+            - {name: DOWNSTREAM, value: "http://orders:8080/orders"}
+            - {name: SLOW_PCT, value: "0"}     # % of requests that are slow
+            - {name: ERROR_PCT, value: "1"}     # % of requests that return 500
+          ports: [{containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /healthz, port: 8080}}
+          resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {memory: 96Mi}}
+          volumeMounts: [{name: code, mountPath: /code}]
+      volumes: [{name: code, configMap: {name: app-code}}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: demo
+spec:
+  selector: {app: frontend}
+  ports: [{port: 8080, targetPort: 8080}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders
+  namespace: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: orders}
+  template:
+    metadata:
+      labels: {app: orders}
+    spec:
+      containers:
+        - name: app
+          image: python:3.13-slim
+          command: ["python", "-u", "/code/server.py"]
+          env:
+            - {name: SERVICE_NAME, value: "orders"}
+            - {name: DOWNSTREAM, value: "http://inventory:8080/stock"}
+            - {name: SLOW_PCT, value: "0"}     # % of requests that are slow
+            - {name: ERROR_PCT, value: "0"}     # % of requests that return 500
+          ports: [{containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /healthz, port: 8080}}
+          resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {memory: 96Mi}}
+          volumeMounts: [{name: code, mountPath: /code}]
+      volumes: [{name: code, configMap: {name: app-code}}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orders
+  namespace: demo
+spec:
+  selector: {app: orders}
+  ports: [{port: 8080, targetPort: 8080}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory
+  namespace: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: inventory}
+  template:
+    metadata:
+      labels: {app: inventory}
+    spec:
+      containers:
+        - name: app
+          image: python:3.13-slim
+          command: ["python", "-u", "/code/server.py"]
+          env:
+            - {name: SERVICE_NAME, value: "inventory"}
+            - {name: DOWNSTREAM, value: ""}       # last hop, no downstream
+            - {name: SLOW_PCT, value: "10"}     # % of requests that are slow
+            - {name: ERROR_PCT, value: "5"}     # % of requests that return 500
+          ports: [{containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /healthz, port: 8080}}
+          resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {memory: 96Mi}}
+          volumeMounts: [{name: code, mountPath: /code}]
+      volumes: [{name: code, configMap: {name: app-code}}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inventory
+  namespace: demo
+spec:
+  selector: {app: inventory}
+  ports: [{port: 8080, targetPort: 8080}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: load-gen
+  namespace: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: load-gen}
+  template:
+    metadata:
+      labels: {app: load-gen}
+    spec:
+      containers:
+        - name: load-gen
+          image: python:3.13-slim
+          command: ["python", "-u", "/code/loadgen.py"]
+          env: [{name: TARGET, value: "http://frontend:8080/"}]
+          resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {memory: 64Mi}}
+          volumeMounts: [{name: code, mountPath: /code}]
+      volumes: [{name: code, configMap: {name: app-code}}]

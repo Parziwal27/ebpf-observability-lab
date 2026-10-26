@@ -1,0 +1,12 @@
+# Single-node kind cluster with NO default CNI -> Cilium (eBPF) becomes the CNI.
+#
+# NOTE: we KEEP kube-proxy here. Full kube-proxy replacement needs Cilium to attach
+# eBPF programs to cgroup "connect/sendmsg" hooks, but on this laptop Cisco Secure
+# Client already owns those hooks exclusively (see README -> "Lessons learned").
+nodes:
+  - role: control-plane
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: ebpf-lab
+networking:
+  disableDefaultCNI: true   # no kindnet -> Cilium is the CNI

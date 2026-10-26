@@ -1,0 +1,10 @@
+# Cilium Helm values (applied via `cilium install --values`)
+kubeProxyReplacement: false   # kube-proxy keeps doing Service routing (iptables)
+socketLB:
+  enabled: false              # don't touch cgroup connect/sendmsg hooks (Cisco owns them)
+hubble:
+  enabled: true
+  relay:
+    enabled: true             # aggregates flows from every node's agent
+  ui:
+    enabled: true             # web UI with live service map

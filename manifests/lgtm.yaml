@@ -1,0 +1,42 @@
+# Grafana "LGTM" all-in-one: Loki (logs) + Grafana (UI) + Tempo (traces) + Mimir/Prometheus (metrics)
+# plus an OpenTelemetry Collector listening on 4317 (gRPC) / 4318 (HTTP).
+# Great for learning; NOT for production (no persistence, single pod).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lgtm
+  namespace: observability
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: lgtm}
+  template:
+    metadata:
+      labels: {app: lgtm}
+    spec:
+      containers:
+        - name: lgtm
+          image: grafana/otel-lgtm:0.35.0
+          ports:
+            - {name: grafana,   containerPort: 3000}
+            - {name: otlp-grpc, containerPort: 4317}
+            - {name: otlp-http, containerPort: 4318}
+          readinessProbe: {httpGet: {path: /api/health, port: 3000}, periodSeconds: 10}
+          resources: {requests: {cpu: 200m, memory: 512Mi}, limits: {memory: 1536Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lgtm
+  namespace: observability
+spec:
+  selector: {app: lgtm}
+  ports:
+    - {name: grafana,   port: 3000, targetPort: 3000}
+    - {name: otlp-grpc, port: 4317, targetPort: 4317}
+    - {name: otlp-http, port: 4318, targetPort: 4318}
